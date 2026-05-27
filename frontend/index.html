@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Scrub — private information redaction</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Newsreader:ital,opsz@0,6..72;1,6..72&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  :root{
+    --paper:#f4f1ea; --card:#fbfaf6; --ink:#2b2b2b; --muted:#8a8478;
+    --line:#d8cfb8; --teal:#1f6f6f; --teal-dk:#185656;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--paper);color:var(--ink);font-family:'Newsreader',Georgia,serif;
+    -webkit-font-smoothing:antialiased;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  .display{font-family:'Fraunces',serif;}
+  .btn{cursor:pointer;border:none;transition:all .15s ease;font-family:inherit;}
+  .btn:hover{transform:translateY(-1px);}
+  .seg{cursor:pointer;transition:all .12s ease;user-select:none;}
+  ::selection{background:#d8cfb8;}
+  .drop.over{border-color:var(--teal)!important;background:#eef5f4!important;}
+  @keyframes fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+  .fade{animation:fade .4s ease both;}
+  .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--teal);
+    border-radius:50%;animation:rot 0.8s linear infinite;}
+  @keyframes rot{to{transform:rotate(360deg);}}
+  ::-webkit-scrollbar{width:10px;height:10px;}
+  ::-webkit-scrollbar-thumb{background:#cfc6b0;border-radius:5px;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState, useRef, useMemo} = React;
+
+// Point at the backend. Same-origin when served by FastAPI; localhost in dev.
+const API = (location.port === "3000") ? "http://localhost:8000" : "";
+
+function fmtSize(bytes){
+  if(bytes<1024) return bytes+" B";
+  if(bytes<1024*1024) return (bytes/1024).toFixed(1)+" KB";
+  return (bytes/1024/1024).toFixed(1)+" MB";
+}
+
+function App(){
+  const [stage,setStage]=useState("upload"); // upload | loading | review
+  const [data,setData]=useState(null);
+  const [globalPolicy,setGlobalPolicy]=useState("fake");
+  const [overrides,setOverrides]=useState({});
+  const [dragOver,setDragOver]=useState(false);
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [savedPath,setSavedPath]=useState("");
+  // Map of type -> bool. Default (missing key) = group is collapsed; user
+  // expands a group by clicking its header.
+  const [openGroups,setOpenGroups]=useState({});
+  const [outputs,setOutputs]=useState([]);
+  const fileInput=useRef(null);
+
+  async function refreshOutputs(){
+    try{
+      const res=await fetch(`${API}/api/outputs`);
+      if(res.ok) setOutputs(await res.json());
+    }catch(e){/* silent */}
+  }
+
+  const policyFor=(cid)=>overrides[cid]??globalPolicy;
+
+  async function upload(file){
+    if(!file) return;
+    setErr(""); setStage("loading");
+    const fd=new FormData(); fd.append("file",file);
+    try{
+      const res=await fetch(`${API}/analyze`,{method:"POST",body:fd});
+      if(!res.ok){
+        const j=await res.json().catch(()=>({}));
+        throw new Error(j.detail||`Server error (${res.status})`);
+      }
+      const j=await res.json();
+      setData(j); setOverrides({}); setGlobalPolicy("fake"); setSavedPath(""); setOpenGroups({}); setStage("review");
+      refreshOutputs();
+    }catch(e){
+      setErr(e.message||"Could not reach the local server. Is it running?");
+      setStage("upload");
+    }
+  }
+
+  async function download(){
+    setBusy(true);
+    try{
+      const res=await fetch(`${API}/transform`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({session_id:data.session_id,global_policy:globalPolicy,overrides}),
+      });
+      if(!res.ok){const j=await res.json().catch(()=>({}));throw new Error(j.detail||"Transform failed");}
+      const blob=await res.blob();
+      const cd=res.headers.get("Content-Disposition")||"";
+      const m=cd.match(/filename="?([^"]+)"?/);
+      const name=m?m[1]:"scrubbed";
+      setSavedPath(res.headers.get("X-Scrub-Saved-Path")||"");
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement("a");a.href=url;a.download=name;a.click();
+      URL.revokeObjectURL(url);
+      refreshOutputs();
+    }catch(e){ setErr(e.message); }
+    setBusy(false);
+  }
+
+  // Build highlighted preview from text + findings + current policies
+  const preview=useMemo(()=>{
+    if(!data) return null;
+    const {text,findings,clusters}=data;
+    const cmap={}; clusters.forEach(c=>cmap[c.cluster_id]=c);
+    const out=[]; let cursor=0;
+    findings.forEach((f,i)=>{
+      if(f.start>cursor) out.push(<span key={"t"+i}>{text.slice(cursor,f.start)}</span>);
+      const pol=policyFor(f.cluster_id); const c=cmap[f.cluster_id];
+      let content,style;
+      if(pol==="redact"){content="█".repeat(Math.max(4,f.text.length));
+        style={background:"#1a1a1a",color:"#1a1a1a",borderRadius:3,padding:"0 2px"};}
+      else if(pol==="fake"){content=c.fake_preview;
+        style={background:f.color+"22",color:f.color,borderBottom:`2px solid ${f.color}`,borderRadius:2,padding:"0 1px"};}
+      else if(pol==="label"){content=c.tag;
+        style={background:f.color+"18",color:f.color,fontStyle:"italic",
+          border:`1px dashed ${f.color}66`,borderRadius:3,padding:"0 4px"};}
+      else{content=f.text; style={background:f.color+"12",borderBottom:`1px dotted ${f.color}88`,borderRadius:2};}
+      out.push(<span key={"s"+i} style={style} title={`${f.label} · ${Math.round(f.score*100)}% confident → ${pol}`}>{content}</span>);
+      cursor=f.end;
+    });
+    if(cursor<text.length) out.push(<span key="te">{text.slice(cursor)}</span>);
+    return out;
+  },[data,overrides,globalPolicy]);
+
+  // ---- UPLOAD ----
+  if(stage==="upload") return (
+    <div>
+      <Header/>
+      <div style={{maxWidth:720,margin:"56px auto",padding:"0 24px"}} className="fade">
+        <div className={"drop btn"+(dragOver?" over":"")}
+          onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+          onDragLeave={()=>setDragOver(false)}
+          onDrop={e=>{e.preventDefault();setDragOver(false);upload(e.dataTransfer.files[0]);}}
+          onClick={()=>fileInput.current.click()}
+          style={{border:`2px dashed var(--line)`,background:"var(--card)",borderRadius:10,
+            padding:"60px 32px",textAlign:"center"}}>
+          <div style={{fontSize:42,marginBottom:14}}>📄</div>
+          <div className="display" style={{fontSize:21,marginBottom:6,fontWeight:600}}>Drop a document here</div>
+          <div style={{fontSize:15,color:"var(--muted)"}}>or click to choose — Word (.docx), PDF, or text</div>
+          <input ref={fileInput} type="file" accept=".txt,.docx,.pdf" style={{display:"none"}}
+            onChange={e=>upload(e.target.files[0])}/>
+        </div>
+        {err&&<div style={{marginTop:20,padding:"12px 16px",background:"#fbeaea",border:"1px solid #e0b4b4",
+          borderRadius:6,color:"#9a3b3b",fontSize:14}}>{err}</div>}
+        <p style={{marginTop:28,textAlign:"center",fontSize:13.5,color:"var(--muted)",fontStyle:"italic"}}>
+          Everything runs on this computer. No file ever leaves your machine.
+        </p>
+      </div>
+    </div>
+  );
+
+  // ---- LOADING ----
+  if(stage==="loading") return (
+    <div>
+      <Header/>
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:18,marginTop:140}} className="fade">
+        <div className="spin"/>
+        <div style={{color:"var(--muted)",fontSize:15}}>Reading the document and finding private information…</div>
+      </div>
+    </div>
+  );
+
+  // ---- REVIEW ----
+  const {clusters,report}=data;
+  return (
+    <div>
+      <Header onReset={()=>{setStage("upload");setData(null);}}/>
+      <div style={{display:"flex",height:"calc(100vh - 62px)"}}>
+        <div style={{width:280,borderRight:"1px solid var(--line)",background:"var(--card)",
+          overflow:"auto",padding:24,display:"flex",flexDirection:"column"}}>
+          <div style={{flexShrink:0}}><Label>Saved sessions ({outputs.length})</Label></div>
+          {outputs.length===0&&<div style={{fontSize:12.5,color:"#a89f8a",fontStyle:"italic"}}>
+            Cleaned files will appear here.
+          </div>}
+          {outputs.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {outputs.map(o=>(
+              <div key={o.name} style={{border:"1px solid #e6dfce",borderRadius:6,
+                background:"#fff",padding:"8px 10px"}}>
+                <a href={`${API}/api/outputs/${encodeURIComponent(o.name)}`}
+                  target="_blank" rel="noopener" className="mono"
+                  title="View in new tab"
+                  style={{display:"block",fontSize:11.5,color:"var(--teal-dk)",textDecoration:"none",
+                    wordBreak:"break-all",lineHeight:1.35,marginBottom:5}}>
+                  {o.name}
+                </a>
+                <div style={{display:"flex",alignItems:"center",gap:8,fontSize:10.5,color:"#a89f8a"}}>
+                  <span>{fmtSize(o.size)}</span>
+                  <span style={{flex:1}}/>
+                  <a href={`${API}/api/outputs/${encodeURIComponent(o.name)}?disposition=attachment`}
+                    download={o.name} className="btn"
+                    style={{color:"var(--teal)",textDecoration:"none",fontWeight:600,
+                      fontSize:10.5,letterSpacing:.3}}>
+                    download ↓
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>}
+        </div>
+        <div style={{flex:1,overflow:"auto",padding:"30px 40px"}} className="fade">
+          <div className="mono" style={{fontSize:13,color:"var(--muted)",marginBottom:16}}>
+            {report.filename} · {report.total_findings} item{report.total_findings!==1?"s":""} found · {report.unique_entities} unique
+          </div>
+          <div style={{background:"#fff",border:"1px solid #e0d9c8",borderRadius:8,padding:"42px 50px",
+            fontSize:15.5,lineHeight:1.95,whiteSpace:"pre-wrap",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}}>
+            {preview}
+          </div>
+        </div>
+
+        <div style={{width:374,borderLeft:"1px solid var(--line)",background:"var(--card)",
+          overflow:"auto",padding:24,display:"flex",flexDirection:"column"}}>
+          <button className="btn" onClick={download} disabled={busy||report.total_findings===0}
+            style={{flexShrink:0,background:(busy||report.total_findings===0)?"#c4bba5":"var(--teal)",
+              color:"#fff",padding:"14px",borderRadius:7,fontSize:15,fontWeight:600,letterSpacing:.3,
+              marginBottom:savedPath?6:18}}>
+            {busy?"Preparing…":"Download cleaned document"}
+          </button>
+          {savedPath&&<div className="mono" style={{flexShrink:0,fontSize:11,color:"var(--muted)",
+            marginBottom:18,wordBreak:"break-all"}}>also saved to {savedPath}</div>}
+
+          <div style={{flexShrink:0}}><Label>Do this to everything</Label></div>
+          <div style={{display:"flex",border:"1px solid var(--line)",borderRadius:7,overflow:"hidden",marginBottom:8,flexShrink:0}}>
+            {[["fake","Fake"],["redact","Black out"],["label","Type tag"],["keep","Keep"]].map(([k,l])=>(
+              <div key={k} className="seg" onClick={()=>{setGlobalPolicy(k);setOverrides({});}}
+                style={{flex:1,textAlign:"center",padding:"10px 4px",fontSize:12.5,
+                  background:globalPolicy===k?"var(--teal)":"#fff",
+                  color:globalPolicy===k?"#fff":"#5a564c"}}>{l}</div>
+            ))}
+          </div>
+          <div style={{fontSize:12,color:"#a89f8a",marginBottom:22,fontStyle:"italic",flexShrink:0}}>
+            You can change individual items below.
+          </div>
+
+          <div style={{flexShrink:0}}><Label>What was found ({clusters.length})</Label></div>
+          <div style={{flex:1}}>
+            {(()=>{
+              // Group clusters by entity type. Clusters arrive sorted by type
+              // from the backend so insertion order preserves a stable layout.
+              const groups=[]; const idx=new Map();
+              clusters.forEach(c=>{
+                if(!idx.has(c.type)){idx.set(c.type,groups.length);
+                  groups.push({type:c.type,label:c.label,color:c.color,clusters:[]});}
+                groups[idx.get(c.type)].clusters.push(c);
+              });
+              return groups.map(group=>{
+                // Group-level highlight: the policy if every member is at the
+                // same effective policy; null = mixed (no button highlighted).
+                const pols=group.clusters.map(c=>policyFor(c.cluster_id));
+                const gPol=pols.every(p=>p===pols[0])?pols[0]:null;
+                const setGroup=k=>setOverrides(p=>{
+                  const next={...p};
+                  group.clusters.forEach(c=>{next[c.cluster_id]=k;});
+                  return next;
+                });
+                const isOpen=!!openGroups[group.type];
+                return (
+                  <div key={group.type} style={{marginBottom:14}}>
+                    <div className="btn" onClick={()=>setOpenGroups(p=>({...p,[group.type]:!p[group.type]}))}
+                      style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,marginTop:6,
+                        userSelect:"none"}}>
+                      <span style={{fontSize:10,color:group.color,width:10,display:"inline-block",
+                        transform:isOpen?"rotate(90deg)":"none",transition:"transform .15s"}}>▶</span>
+                      <span style={{width:8,height:8,borderRadius:"50%",background:group.color,flexShrink:0}}/>
+                      <span style={{fontSize:11,textTransform:"uppercase",letterSpacing:.6,color:group.color,fontWeight:700}}>{group.label}</span>
+                      <span style={{fontSize:10,color:"#a89f8a"}}>· {group.clusters.length}</span>
+                    </div>
+                    <div style={{display:"flex",gap:3,marginBottom:8}}>
+                      {[["fake","Fake"],["redact","Black out"],["label","Type"],["keep","Keep"]].map(([k,l])=>(
+                        <div key={k} className="seg" onClick={()=>setGroup(k)}
+                          style={{flex:1,textAlign:"center",padding:"6px 2px",fontSize:11.5,borderRadius:5,
+                            border:"1px solid "+(gPol===k?group.color:"#e0d9c8"),
+                            background:gPol===k?group.color+"22":"#fff",
+                            color:gPol===k?group.color:"#8a8478",fontWeight:gPol===k?700:500}}>{l}</div>
+                      ))}
+                    </div>
+                    {isOpen&&group.clusters.map(c=>{
+                      const pol=policyFor(c.cluster_id);
+                      return (
+                        <div key={c.cluster_id} style={{border:"1px solid #e6dfce",borderRadius:7,
+                          padding:"10px 12px",marginBottom:8,background:"#fff"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+                            {c.count>1&&<span style={{fontSize:10,color:"#a89f8a",background:"#f0ebde",borderRadius:10,padding:"1px 7px"}}>×{c.count}</span>}
+                            <span style={{marginLeft:"auto",fontSize:10,color:"#bbb2a0"}}>{Math.round(c.max_score*100)}%</span>
+                          </div>
+                          <div className="mono" style={{fontSize:13,marginBottom:2,wordBreak:"break-all"}}>{c.text}</div>
+                          {pol==="fake"&&<div className="mono" style={{fontSize:12,color:c.color,marginBottom:8}}>→ {c.fake_preview}</div>}
+                          {pol==="redact"&&<div className="mono" style={{fontSize:12,color:"#999",marginBottom:8}}>→ [redacted]</div>}
+                          {pol==="label"&&<div className="mono" style={{fontSize:12,color:c.color,marginBottom:8,fontStyle:"italic"}}>→ {c.tag}</div>}
+                          {pol==="keep"&&<div style={{fontSize:12,color:"#a89f8a",marginBottom:8,fontStyle:"italic"}}>kept as-is</div>}
+                          <div style={{display:"flex",gap:4}}>
+                            {[["fake","Fake"],["redact","Black out"],["label","Type"],["keep","Keep"]].map(([k,l])=>(
+                              <div key={k} className="seg" onClick={()=>setOverrides(p=>({...p,[c.cluster_id]:k}))}
+                                style={{flex:1,textAlign:"center",padding:"5px 2px",fontSize:11,borderRadius:5,
+                                  border:"1px solid "+(pol===k?c.color:"#e0d9c8"),
+                                  background:pol===k?c.color+"18":"#fff",
+                                  color:pol===k?c.color:"#8a8478",fontWeight:pol===k?700:400}}>{l}</div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              });
+            })()}
+            {clusters.length===0&&<div style={{fontSize:14,color:"#a89f8a",fontStyle:"italic",textAlign:"center",padding:"24px 0"}}>No private information detected.</div>}
+          </div>
+
+          {err&&<div style={{marginTop:10,fontSize:12.5,color:"#9a3b3b",flexShrink:0}}>{err}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Header({onReset}){
+  return (
+    <div style={{borderBottom:"1px solid var(--line)",background:"var(--card)",padding:"16px 28px",
+      display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      <div style={{display:"flex",alignItems:"baseline",gap:12}}>
+        <span className="display" style={{fontSize:24,fontWeight:700,letterSpacing:"-0.5px",color:"var(--teal-dk)"}}>Scrub</span>
+        <span style={{fontSize:13,color:"var(--muted)",fontStyle:"italic"}}>private information redaction — runs locally</span>
+      </div>
+      {onReset&&<button className="btn" onClick={onReset} style={{background:"transparent",color:"var(--muted)",fontSize:13,textDecoration:"underline"}}>← new document</button>}
+    </div>
+  );
+}
+function Label({children}){
+  return <div style={{fontSize:12,textTransform:"uppercase",letterSpacing:1,color:"var(--muted)",marginBottom:10}}>{children}</div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
