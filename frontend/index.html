@@ -60,7 +60,18 @@ function App(){
   // expands a group by clicking its header.
   const [openGroups,setOpenGroups]=useState({});
   const [outputs,setOutputs]=useState([]);
+  const [pasted,setPasted]=useState("");
   const fileInput=useRef(null);
+
+  const goHome=()=>{setStage("upload");setData(null);setErr("");setPasted("");};
+
+  function uploadText(text){
+    const t=(text||"").trim();
+    if(!t){setErr("Type or paste some text first.");return;}
+    const stamp=new Date().toISOString().replace(/[:.]/g,"-").slice(0,19);
+    const file=new File([t],`pasted_${stamp}.txt`,{type:"text/plain"});
+    upload(file);
+  }
 
   async function refreshOutputs(){
     try{
@@ -139,7 +150,7 @@ function App(){
   // ---- UPLOAD ----
   if(stage==="upload") return (
     <div>
-      <Header/>
+      <Header onLogoClick={goHome}/>
       <div style={{maxWidth:720,margin:"56px auto",padding:"0 24px"}} className="fade">
         <div className={"drop btn"+(dragOver?" over":"")}
           onDragOver={e=>{e.preventDefault();setDragOver(true);}}
@@ -154,6 +165,26 @@ function App(){
           <input ref={fileInput} type="file" accept=".txt,.docx,.pdf" style={{display:"none"}}
             onChange={e=>upload(e.target.files[0])}/>
         </div>
+
+        <div style={{display:"flex",alignItems:"center",gap:14,margin:"22px 4px 14px"}}>
+          <div style={{flex:1,height:1,background:"var(--line)"}}/>
+          <span style={{fontSize:12,color:"var(--muted)",letterSpacing:.4,textTransform:"uppercase"}}>or paste text</span>
+          <div style={{flex:1,height:1,background:"var(--line)"}}/>
+        </div>
+
+        <textarea value={pasted} onChange={e=>setPasted(e.target.value)}
+          onClick={e=>e.stopPropagation()}
+          placeholder="Paste or type the text you want to scrub…"
+          style={{width:"100%",minHeight:140,padding:"14px 16px",border:"1px solid var(--line)",
+            borderRadius:8,background:"var(--card)",fontFamily:"'JetBrains Mono',monospace",
+            fontSize:13,lineHeight:1.5,color:"var(--ink)",resize:"vertical",outline:"none"}}/>
+        <button className="btn" onClick={()=>uploadText(pasted)}
+          disabled={!pasted.trim()}
+          style={{marginTop:10,width:"100%",background:pasted.trim()?"var(--teal)":"#c4bba5",
+            color:"#fff",padding:"12px",borderRadius:7,fontSize:14.5,fontWeight:600,letterSpacing:.3}}>
+          Analyze text →
+        </button>
+
         {err&&<div style={{marginTop:20,padding:"12px 16px",background:"#fbeaea",border:"1px solid #e0b4b4",
           borderRadius:6,color:"#9a3b3b",fontSize:14}}>{err}</div>}
         <p style={{marginTop:28,textAlign:"center",fontSize:13.5,color:"var(--muted)",fontStyle:"italic"}}>
@@ -166,7 +197,7 @@ function App(){
   // ---- LOADING ----
   if(stage==="loading") return (
     <div>
-      <Header/>
+      <Header onLogoClick={goHome}/>
       <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:18,marginTop:140}} className="fade">
         <div className="spin"/>
         <div style={{color:"var(--muted)",fontSize:15}}>Reading the document and finding private information…</div>
@@ -178,7 +209,7 @@ function App(){
   const {clusters,report}=data;
   return (
     <div>
-      <Header onReset={()=>{setStage("upload");setData(null);}}/>
+      <Header onLogoClick={goHome} onReset={goHome}/>
       <div style={{display:"flex",height:"calc(100vh - 62px)"}}>
         <div style={{width:280,borderRight:"1px solid var(--line)",background:"var(--card)",
           overflow:"auto",padding:24,display:"flex",flexDirection:"column"}}>
@@ -327,16 +358,16 @@ function App(){
   );
 }
 
-function Header({onReset}){
+function Header({onLogoClick,onReset}){
   return (
     <div style={{borderBottom:"1px solid var(--line)",background:"var(--card)",padding:"16px 28px",
       display:"flex",alignItems:"center",justifyContent:"space-between"}}>
       <div style={{display:"flex",alignItems:"baseline",gap:12}}>
-        <span className={onReset?"display btn":"display"}
-          onClick={onReset||undefined}
-          title={onReset?"Back to upload":undefined}
+        <span className={onLogoClick?"display btn":"display"}
+          onClick={onLogoClick||undefined}
+          title={onLogoClick?"Back to upload":undefined}
           style={{fontSize:24,fontWeight:700,letterSpacing:"-0.5px",color:"var(--teal-dk)",
-            cursor:onReset?"pointer":"default"}}>Scrub</span>
+            cursor:onLogoClick?"pointer":"default"}}>Scrub</span>
         <span style={{fontSize:13,color:"var(--muted)",fontStyle:"italic"}}>private information redaction — runs locally</span>
       </div>
       {onReset&&<button className="btn" onClick={onReset} style={{background:"transparent",color:"var(--muted)",fontSize:13,textDecoration:"underline"}}>← new document</button>}
