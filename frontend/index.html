@@ -332,7 +332,11 @@ function Header({onReset}){
     <div style={{borderBottom:"1px solid var(--line)",background:"var(--card)",padding:"16px 28px",
       display:"flex",alignItems:"center",justifyContent:"space-between"}}>
       <div style={{display:"flex",alignItems:"baseline",gap:12}}>
-        <span className="display" style={{fontSize:24,fontWeight:700,letterSpacing:"-0.5px",color:"var(--teal-dk)"}}>Scrub</span>
+        <span className={onReset?"display btn":"display"}
+          onClick={onReset||undefined}
+          title={onReset?"Back to upload":undefined}
+          style={{fontSize:24,fontWeight:700,letterSpacing:"-0.5px",color:"var(--teal-dk)",
+            cursor:onReset?"pointer":"default"}}>Scrub</span>
         <span style={{fontSize:13,color:"var(--muted)",fontStyle:"italic"}}>private information redaction — runs locally</span>
       </div>
       {onReset&&<button className="btn" onClick={onReset} style={{background:"transparent",color:"var(--muted)",fontSize:13,textDecoration:"underline"}}>← new document</button>}
